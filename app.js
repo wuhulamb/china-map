@@ -75,12 +75,13 @@ var geoLayer = L.geoJSON(geoData, {
     var isBoundary = gb && gb.length === 4;
     var label = isBoundary ? name + ' (边界)' : name;
 
-    layer.bindTooltip(label, {
-      sticky: true,
-      direction: 'top',
-      offset: [0, -8],
-      className: 'city-tooltip'
-    });
+    if (!L.Browser.mobile) {
+      layer.bindTooltip(label, {
+        sticky: true,
+        direction: 'top',
+        offset: [0, -8]
+      });
+    }
 
     layer.on('click', function() {
       if (!gameActive) {
@@ -298,8 +299,9 @@ function endGame() {
   btnGame.textContent = '开始游戏';
   btnGame.className = 'btn btn-start';
 
-  // Re-enable tooltips
+  // Re-enable tooltips (desktop only)
   geoLayer.eachLayer(function(layer) {
+    if (L.Browser.mobile) return;
     var feat = layer.feature;
     var name = feat.properties.name || '未知';
     var gb = feat.properties.gb || '';
