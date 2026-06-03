@@ -10,6 +10,24 @@ var map = L.map('map', {
 
 // No tile layer - just show GeoJSON data on empty背景
 
+// ===== Province Lookup Table =====
+var PROVINCE_MAP = {
+  11: '北京市', 12: '天津市', 13: '河北省', 14: '山西省', 15: '内蒙古自治区',
+  21: '辽宁省', 22: '吉林省', 23: '黑龙江省',
+  31: '上海市', 32: '江苏省', 33: '浙江省', 34: '安徽省', 35: '福建省',
+  36: '江西省', 37: '山东省',
+  41: '河南省', 42: '湖北省', 43: '湖南省', 44: '广东省', 45: '广西壮族自治区', 46: '海南省',
+  50: '重庆市', 51: '四川省', 52: '贵州省', 53: '云南省', 54: '西藏自治区',
+  61: '陕西省', 62: '甘肃省', 63: '青海省', 64: '宁夏回族自治区', 65: '新疆维吾尔自治区',
+  71: '台湾省', 81: '香港特别行政区', 82: '澳门特别行政区'
+};
+
+function getProvinceName(gb) {
+  if (!gb || gb.length < 9) return '';
+  var code = gb.indexOf('156') === 0 ? gb.substring(3, 5) : gb.substring(0, 2);
+  return PROVINCE_MAP[code] || '';
+}
+
 // ===== Parse TopoJSON → GeoJSON =====
 var geoData = { type: 'FeatureCollection', features: [] };
 for (var key in CHINA_CITIES.objects) {
@@ -52,6 +70,27 @@ geoData.features.forEach(function(f) {
 
 var cityCount = Object.keys(cityMap).length;
 
+// Build province → cities index
+var provinceCities = {};
+var provinceNameToCode = {};
+for (var pCode in PROVINCE_MAP) {
+  provinceCities[pCode] = [];
+  provinceNameToCode[PROVINCE_MAP[pCode].toLowerCase()] = pCode;
+  // Also add short name (e.g. "安徽" for "安徽省")
+  var shortPName = PROVINCE_MAP[pCode].replace(/省|市|自治区|特别行政区|壮族|回族|维吾尔/g, '').toLowerCase();
+  if (shortPName !== PROVINCE_MAP[pCode].toLowerCase()) {
+    provinceNameToCode[shortPName] = pCode;
+  }
+}
+geoData.features.forEach(function(f) {
+  var gb = f.properties.gb || '';
+  if (gb.length < 9) return;
+  var pCode = gb.indexOf('156') === 0 ? gb.substring(3, 5) : gb.substring(0, 2);
+  if (provinceCities[pCode]) {
+    provinceCities[pCode].push(f);
+  }
+});
+
 // Set initial detail panel
 document.getElementById('detail-panel').innerHTML =
   '<div class="placeholder">' +
@@ -83,10 +122,15 @@ var geoLayer = L.geoJSON(geoData, {
       });
     }
 
-    layer.on('click', function() {
+    layer.on('click', function(e) {
       if (!gameActive) {
-        showDetail(feature);
-        highlightFeature(layer);
+        if (e.originalEvent && e.originalEvent.ctrlKey) {
+          toggleMultiSelect(feature);
+        } else {
+          clearMultiSelect();
+          clearProvinceHighlight();
+          selectSingleFeature(feature);
+        }
       }
     });
 
@@ -112,17 +156,150 @@ function highlightFeature(layer) {
   });
 }
 
-// ===== Search =====
+// ===== Multi-Select (Ctrl+Click) =====
+var selectedFeatures = [];
+
+function selectSingleFeature(f) {
+  selectedFeatures = [f];
+  showDetail(f);
+  highlightFeature(f._layer);
+}
+
+function clearMultiSelect() {
+  selectedFeatures.forEach(function(f) {
+    if (f._layer) geoLayer.resetStyle(f._layer);
+  });
+  selectedFeatures = [];
+}
+
+function toggleMultiSelect(f) {
+  var idx = selectedFeatures.indexOf(f);
+  if (idx !== -1) {
+    // Deselect
+    selectedFeatures.splice(idx, 1);
+    if (f._layer) geoLayer.resetStyle(f._layer);
+  } else {
+    // Select
+    selectedFeatures.push(f);
+    if (f._layer) {
+      f._layer.setStyle({
+        color: '#2980b9',
+        weight: 2.5,
+        fillColor: '#3498db',
+        fillOpacity: 0.4
+      });
+    }
+  }
+  showMultiDetail();
+}
+
+function showMultiDetail() {
+  var panel = document.getElementById('detail-panel');
+  if (selectedFeatures.length === 0) {
+    panel.innerHTML = '<div class="placeholder"><div class="icon">🗺️</div><div>搜索或点击地图上的城市查看详情</div></div>';
+    return;
+  }
+  var html = '';
+  selectedFeatures.forEach(function(f, i) {
+    var name = f.properties.name || '未知';
+    var gb = f.properties.gb || '';
+    var displayGb = gb;
+    if (displayGb && displayGb.length > 6 && displayGb.indexOf('156') == 0) {
+      displayGb = displayGb.substring(3);
+    }
+    var province = getProvinceName(gb);
+    html += '<div class="detail-card' + (i > 0 ? ' multi-card' : '') + '">' +
+      '<span class="num">' + (i + 1) + '.</span> ' +
+      '<h2>' + name + '</h2>' +
+      '<div class="gb">' + displayGb + '</div>' +
+      (province ? '<div class="info-row"><span class="label">省份</span><span class="value">' + province + '</span></div>' : '') +
+      '</div>';
+  });
+  panel.innerHTML = html;
+}
+
 var searchInput = document.getElementById('search-input');
 var searchResults = document.getElementById('search-results');
 var allFeatures = geoData.features;
+
+// Track province-highlighted layers so we can clear them
+var provinceHighlightedLayers = [];
+
+function clearProvinceHighlight() {
+  provinceHighlightedLayers.forEach(function(layer) {
+    if (layer._layer) geoLayer.resetStyle(layer._layer);
+  });
+  provinceHighlightedLayers = [];
+}
+
+function highlightProvince(provCode) {
+  clearProvinceHighlight();
+  clearMultiSelect();
+  // Reset any single-feature highlight
+  if (highlightedLayer) {
+    geoLayer.resetStyle(highlightedLayer);
+    highlightedLayer = null;
+  }
+
+  var cities = provinceCities[provCode];
+  if (!cities || cities.length === 0) return;
+
+  cities.forEach(function(f) {
+    if (f._layer) {
+      f._layer.setStyle({
+        color: '#2980b9',
+        weight: 2,
+        fillColor: '#3498db',
+        fillOpacity: 0.4
+      });
+      provinceHighlightedLayers.push(f);
+    }
+  });
+
+  // Show summary in detail panel
+  var provName = PROVINCE_MAP[provCode];
+  var panel = document.getElementById('detail-panel');
+  var html = '<div class="detail-card">' +
+    '<h2>' + provName + '</h2>' +
+    '<div class="info-row"><span class="label">城市数量</span><span class="value">' + cities.length + '</span></div>';
+  cities.forEach(function(f) {
+    var name = f.properties.name || '未知';
+    html += '<div class="city-row">' + name + '</div>';
+  });
+  html += '</div>';
+  panel.innerHTML = html;
+
+  // Zoom to fit all cities in the province
+  var group = L.featureGroup(cities.map(function(f) { return f._layer; }));
+  if (group.getBounds().isValid()) {
+    map.fitBounds(group.getBounds(), { padding: [30, 30], maxZoom: 8 });
+  }
+}
 
 searchInput.addEventListener('input', function() {
   var q = this.value.trim().toLowerCase();
   searchResults.style.display = q ? 'block' : 'none';
   searchResults.innerHTML = '';
-  if (!q) return;
+  if (!q) {
+    // Clear province highlight when search is empty
+    clearProvinceHighlight();
+    document.getElementById('detail-panel').innerHTML =
+      '<div class="placeholder"><div class="icon">🗺️</div><div>搜索或点击地图上的城市查看详情</div></div>';
+    return;
+  }
 
+  // Check if query exactly matches a province name (full or short)
+  var provCode = provinceNameToCode[q];
+  if (provCode) {
+    searchResults.style.display = 'none'; // Don't show dropdown
+    highlightProvince(provCode);
+    return;
+  }
+
+  // Not a province match — clear any previous province highlight
+  clearProvinceHighlight();
+
+  // Normal city search
   var matches = [];
   allFeatures.forEach(function(f) {
     var name = (f.properties.name || '').toLowerCase();
@@ -136,7 +313,13 @@ searchInput.addEventListener('input', function() {
     var div = document.createElement('div');
     var name = f.properties.name || '未知';
     var gb = f.properties.gb || '';
-    div.innerHTML = name + '<span class="gb-code">' + gb + '</span>';
+    var displayGb = gb;
+    if (displayGb && displayGb.length > 6 && displayGb.indexOf('156') == 0) {
+      displayGb = displayGb.substring(3);
+    }
+    var province = getProvinceName(gb);
+    var provinceHtml = province ? '<span class="province">' + province + '</span>' : '';
+    div.innerHTML = name + provinceHtml + '<span class="gb-code">' + displayGb + '</span>';
     div.dataset.idx = '';
     div.addEventListener('click', function() {
       selectSearchResult(f);
@@ -192,10 +375,11 @@ function selectSearchResult(f) {
   searchInput.value = f.properties.name || '';
   searchResults.style.display = 'none';
   searchResults._items = null;
-  showDetail(f);
+  clearMultiSelect();
+  clearProvinceHighlight();
+  selectSingleFeature(f);
   var layer = f._layer;
   if (layer) {
-    highlightFeature(layer);
     map.fitBounds(layer.getBounds(), { padding: [50, 50], maxZoom: 8 });
   }
 }
@@ -211,9 +395,11 @@ function showDetail(feature) {
     displayGgb = displayGgb.substring(3);
   }
 
+  var province = getProvinceName(gb);
   panel.innerHTML = '<div class="detail-card">' +
     '<h2>' + name + '</h2>' +
     '<div class="gb">' + displayGgb + '</div>' +
+    (province ? '<div class="info-row"><span class="label">省份</span><span class="value">' + province + '</span></div>' : '') +
         '</div>';
 }
 
@@ -242,6 +428,7 @@ function startGame() {
   guessedNames = {};
   gameScore = 0;
   highlightedLayer = null;
+  clearProvinceHighlight();
 
   // Clear search and toggle UI
   searchInput.value = '';
